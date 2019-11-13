@@ -78,6 +78,8 @@ import org.apache.ignite.internal.processors.cache.mvcc.msg.MvccRecoveryFinished
 import org.apache.ignite.internal.processors.cache.transactions.TxDeadlockDetection.TxDeadlockFuture;
 import org.apache.ignite.internal.processors.cache.version.GridCacheVersion;
 import org.apache.ignite.internal.processors.cluster.BaselineTopology;
+import org.apache.ignite.internal.util.lang.gridfunc.ReadOnlyCollectionView2X;
+import org.apache.ignite.spi.systemview.view.TransactionView;
 import org.apache.ignite.internal.processors.metric.impl.HitRateMetric;
 import org.apache.ignite.internal.processors.timeout.GridTimeoutObjectAdapter;
 import org.apache.ignite.internal.transactions.IgniteTxOptimisticCheckedException;
@@ -142,6 +144,12 @@ import static org.jsr166.ConcurrentLinkedHashMap.QueuePolicy.PER_SEGMENT_Q;
  * Cache transaction manager.
  */
 public class IgniteTxManager extends GridCacheSharedManagerAdapter {
+    /** */
+    public static final String TXS_MON_LIST = "transactions";
+
+    /** */
+    public static final String TXS_MON_LIST_DESC = "Running transactions";
+
     /** Default maximum number of transactions that have completed. */
     private static final int DFLT_MAX_COMPLETED_TX_CNT = 262144; // 2^18
 
@@ -343,6 +351,11 @@ public class IgniteTxManager extends GridCacheSharedManagerAdapter {
         this.logTxRecords = IgniteSystemProperties.getBoolean(IGNITE_WAL_LOG_TX_RECORDS, false);
 
         cctx.txMetrics().onTxManagerStarted();
+
+        cctx.kernalContext().systemView().registerView(TXS_MON_LIST, TXS_MON_LIST_DESC,
+            TransactionView.class,
+            new ReadOnlyCollectionView2X<>(idMap.values(), nearIdMap.values()),
+            TransactionView::new);
     }
 
     /** {@inheritDoc} */
@@ -1110,7 +1123,7 @@ public class IgniteTxManager extends GridCacheSharedManagerAdapter {
         if (tx.pessimistic() && tx.local())
             return; // Nothing else to do in pessimistic mode.
 
-        // Optimistic.
+        // Optimistic or remote tx.
         assert tx.optimistic() || !tx.local();
 
         if (!lockMultiple(tx, entries != null ? entries : tx.optimisticLockEntries())) {
@@ -1916,7 +1929,7 @@ public class IgniteTxManager extends GridCacheSharedManagerAdapter {
                             tx + ", invalidPart=" + e.partition() + ']';
 
                         // If partition is invalid, we ignore this entry.
-                        tx.addInvalidPartition(cacheCtx, e.partition());
+                        tx.addInvalidPartition(cacheCtx.cacheId(), e.partition());
 
                         break;
                     }
@@ -1957,7 +1970,12 @@ public class IgniteTxManager extends GridCacheSharedManagerAdapter {
                 if (log.isDebugEnabled())
                     log.debug("Got removed entry in TM txUnlock(..) method (will retry): " + txEntry);
 
-                txEntry.cached(txEntry.context().cache().entryEx(txEntry.key(), tx.topologyVersion()));
+                try {
+                    txEntry.cached(txEntry.context().cache().entryEx(txEntry.key(), tx.topologyVersion()));
+                }
+                catch (GridDhtInvalidPartitionException e) {
+                    return; // Ignore and proceed to next lock.
+                }
             }
         }
     }
